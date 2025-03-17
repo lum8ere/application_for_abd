@@ -1,154 +1,175 @@
-import tkinter as tk
+import sys
 import threading
 import subprocess
 import adbutils
 
-class ADBApp:
-    def __init__(self, master):
-        self.master = master
-        master.title("ADB Device Manager")
-        master.geometry("700x400")
-        
-        # Левая панель (список устройств)
-        self.left_frame = tk.Frame(master, width=300, bd=2, relief="groove")
-        self.left_frame.grid(row=0, column=0, sticky="ns", padx=5, pady=5)
-        
-        # Правая панель (вывод и кнопка)
-        self.right_frame = tk.Frame(master, bd=2, relief="groove")
-        self.right_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        master.grid_columnconfigure(1, weight=1)
-        master.grid_rowconfigure(0, weight=1)
-        
-        # Заголовок для левой панели
-        tk.Label(self.left_frame, text="Connected Devices", font=("Helvetica", 14)).pack(pady=10)
-        
-        # Фрейм для списка устройств
-        self.device_list_frame = tk.Frame(self.left_frame)
-        self.device_list_frame.pack(fill="both", expand=True)
-        
-        # Текстовое поле для вывода (справа)
-        self.output_text = tk.Text(self.right_frame, height=20, width=50)
-        self.output_text.pack(pady=10, padx=10, fill="both", expand=True)
-        
-        # Кнопка для установки device owner
-        self.command_button = tk.Button(
-            self.right_frame, 
-            text="Set Device Owner", 
-            command=self.send_command, 
-            font=("Helvetica", 12)
-        )
-        self.command_button.pack(pady=10)
-        
-        # Запуск периодического обновления списка устройств
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QTextEdit, QScrollArea, QFrame
+)
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+
+class ADBApp(QMainWindow):
+    log_signal = pyqtSignal(str)  # Сигнал для обновления логов
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ADB Device Manager")
+        self.resize(900, 400)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+
+        # Левая панель для списка устройств
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        title_label = QLabel("Connected Devices")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet("font-size: 14pt;")
+        left_layout.addWidget(title_label)
+
+        # Область прокрутки для списка устройств
+        self.device_scroll = QScrollArea()
+        self.device_scroll.setWidgetResizable(True)
+        self.device_list_widget = QWidget()
+        self.device_list_layout = QVBoxLayout(self.device_list_widget)
+        self.device_list_layout.addStretch()
+        self.device_scroll.setWidget(self.device_list_widget)
+        left_layout.addWidget(self.device_scroll)
+
+        # Правая панель для вывода и кнопки
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        self.output_text = QTextEdit()
+        self.output_text.setReadOnly(True)
+        right_layout.addWidget(self.output_text)
+        self.command_button = QPushButton("Set Device Owner")
+        self.command_button.setStyleSheet("font-size: 12pt; padding: 5px;")
+        self.command_button.clicked.connect(self.send_command)
+        right_layout.addWidget(self.command_button)
+
+        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(right_panel, 2)
+
+        # Подключаем сигнал для обновления логов
+        self.log_signal.connect(self.update_log)
+
+        # Обновление списка устройств каждые 3 секунды
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_device_list)
+        self.timer.start(3000)
+
         self.update_device_list()
 
+    def update_log(self, text):
+        """Слот для обновления виджета логов."""
+        self.output_text.append(text)
+
     def update_device_list(self):
-        """Обновление списка подключённых устройств и их статусов."""
-        # Очищаем предыдущие элементы
-        for widget in self.device_list_frame.winfo_children():
-            widget.destroy()
-        
+        """Обновление списка подключённых устройств."""
+        # Удаляем старые записи, оставляя последний spacer
+        while self.device_list_layout.count() > 1:
+            item = self.device_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
         try:
-            devices = adbutils.adb.list()
+            devices = adbutils.adb.device_list()
             if devices:
                 for device in devices:
                     self.add_device_entry(device)
             else:
-                tk.Label(self.device_list_frame, text="No devices connected").pack(pady=5)
+                label = QLabel("No devices connected")
+                self.device_list_layout.insertWidget(0, label)
         except Exception as e:
-            tk.Label(self.device_list_frame, text=f"Error: {e}", fg="red").pack(pady=5)
-        
-        # Обновление каждые 3 секунды
-        self.master.after(3000, self.update_device_list)
+            label = QLabel(f"Error: {e}")
+            label.setStyleSheet("color: red;")
+            self.device_list_layout.insertWidget(0, label)
 
-    def add_device_entry(self, device: adbutils.AdbDeviceInfo):
-        """Добавление записи для одного устройства в список."""
-        frame = tk.Frame(self.device_list_frame, pady=5)
-        frame.pack(fill="x", padx=5)
-        
-        # Отображаем серийный номер устройства
-        serial_label = tk.Label(frame, text=device.serial, font=("Helvetica", 10))
-        serial_label.pack(side="left", padx=5)
-        
-        # Проверяем наличие device owner через dumpsys device_policy
-        device_policy_dump = adbutils.adb.shell(device.serial, "dumpsys device_policy")
-        if "Device Owner:" in device_policy_dump:
-            owner_set = True
-        else:
+    def add_device_entry(self, device):
+        """Добавление записи для одного устройства."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+
+        # Отображение серийного номера
+        serial_label = QLabel(device.serial)
+        layout.addWidget(serial_label)
+
+        # Проверка наличия device owner через dumpsys device_policy
+        try:
+            dump = device.shell("dumpsys device_policy")
+            owner_set = "Device Owner:" in dump
+        except Exception:
             owner_set = False
-        
-        # Индикатор device owner (квадрат 20x20)
-        owner_canvas = tk.Canvas(frame, width=20, height=20, highlightthickness=0)
-        owner_canvas.pack(side="left", padx=5)
-        color_owner = "green" if owner_set else "red"
-        owner_canvas.create_rectangle(0, 0, 20, 20, fill=color_owner)
-        tk.Label(frame, text="Owner", font=("Helvetica", 8)).pack(side="left", padx=(0, 10))
-        
-        # Проверяем, установлен ли пакет com.hmdm.launcher
-        pkg_list = adbutils.adb.shell(device.serial, "pm list packages")
-        if "com.hmdm.launcher" in pkg_list:
-            pkg_installed = True
-        else:
+
+        owner_indicator = QFrame()
+        owner_indicator.setFixedSize(20, 20)
+        owner_color = "green" if owner_set else "red"
+        owner_indicator.setStyleSheet(f"background-color: {owner_color}; border: 1px solid black;")
+        layout.addWidget(owner_indicator)
+        layout.addWidget(QLabel("Owner"))
+
+        # Проверка установленного пакета com.hmdm.launcher
+        try:
+            pkg_list = device.shell("pm list packages")
+            pkg_installed = "com.hmdm.launcher" in pkg_list
+        except Exception:
             pkg_installed = False
-        
-        # Индикатор наличия пакета (квадрат 20x20)
-        pkg_canvas = tk.Canvas(frame, width=20, height=20, highlightthickness=0)
-        pkg_canvas.pack(side="left", padx=5)
-        color_pkg = "green" if pkg_installed else "red"
-        pkg_canvas.create_rectangle(0, 0, 20, 20, fill=color_pkg)
-        tk.Label(frame, text="Launcher", font=("Helvetica", 8)).pack(side="left")
-    
+
+        pkg_indicator = QFrame()
+        pkg_indicator.setFixedSize(20, 20)
+        pkg_color = "green" if pkg_installed else "red"
+        pkg_indicator.setStyleSheet(f"background-color: {pkg_color}; border: 1px solid black;")
+        layout.addWidget(pkg_indicator)
+        layout.addWidget(QLabel("Launcher"))
+
+        self.device_list_layout.insertWidget(0, widget)
+
     def send_command(self):
         """Запуск выполнения команды для всех устройств в отдельном потоке."""
-        threading.Thread(target=self.run_command).start()
+        threading.Thread(target=self.run_command, daemon=True).start()
 
     def run_command(self):
-        self.append_output("Sending command to all devices...\n")
+        self.log_signal.emit("Sending command to all devices...\n")
         try:
-            devices = adbutils.adb.list()
+            devices = adbutils.adb.device_list()
             if not devices:
-                self.append_output("No devices connected.\n")
+                self.log_signal.emit("No devices connected.\n")
                 return
-            
+
             for device in devices:
-                self.append_output(f"\nProcessing device: {device.serial}\n")
-                
-                # Проверяем наличие device owner через dumpsys device_policy
-                device_policy_dump = adbutils.adb.shell(device.serial, "dumpsys device_policy")
-                if "Device Owner:" in device_policy_dump:
-                    self.append_output(f"Device {device.serial} already has a device owner.\n")
+                self.log_signal.emit(f"\nProcessing device: {device.serial}\n")
+                dump = device.shell("dumpsys device_policy")
+                if "Device Owner:" in dump:
+                    self.log_signal.emit(f"Device {device.serial} already has a device owner.\n")
                     continue
-                
-                # Проверяем, установлен ли нужный пакет (com.hmdm.launcher)
-                pkg_list = adbutils.adb.shell(device.serial, "pm list packages")
+
+                pkg_list = device.shell("pm list packages")
                 if "com.hmdm.launcher" not in pkg_list:
-                    self.append_output(f"Package 'com.hmdm.launcher' is missing on {device.serial}.\n")
+                    self.log_signal.emit(f"Package 'com.hmdm.launcher' is missing on {device.serial}.\n")
                     continue
-                
-                # Выполняем команду установки device owner
-                output = adbutils.adb.shell(device.serial, "dpm set-device-owner com.hmdm.launcher/.AdminReceiver")
+
+                output = device.shell("dpm set-device-owner com.hmdm.launcher/.AdminReceiver")
                 if "error" in output.lower() or "failure" in output.lower():
-                    self.append_output(f"Command error on device {device.serial}: {output}\n")
-                    self.append_output("Attempting to kill adb server...\n")
+                    self.log_signal.emit(f"Command error on device {device.serial}: {output}\n")
+                    self.log_signal.emit("Attempting to kill adb server...\n")
                     subprocess.run(["adb", "kill-server"], capture_output=True, text=True)
-                    self.append_output("ADB server killed.\n")
+                    self.log_signal.emit("ADB server killed.\n")
                 else:
-                    self.append_output(f"Command executed successfully on device {device.serial}.\n")
+                    self.log_signal.emit(f"Command executed successfully on device {device.serial}.\n")
         except Exception as e:
-            self.append_output(f"Exception occurred: {e}\n")
-            self.append_output("Attempting to kill adb server...\n")
+            self.log_signal.emit(f"Exception occurred: {e}\n")
+            self.log_signal.emit("Attempting to kill adb server...\n")
             try:
                 subprocess.run(["adb", "kill-server"], capture_output=True, text=True)
-                self.append_output("ADB server killed.\n")
+                self.log_signal.emit("ADB server killed.\n")
             except Exception as kill_e:
-                self.append_output(f"Failed to kill adb server: {kill_e}\n")
-
-    def append_output(self, text: str):
-        """Добавление текста в окно вывода."""
-        self.output_text.insert(tk.END, text)
-        self.output_text.see(tk.END)
+                self.log_signal.emit(f"Failed to kill adb server: {kill_e}\n")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ADBApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = ADBApp()
+    window.show()
+    sys.exit(app.exec())
