@@ -212,8 +212,8 @@ class ADBApp(QMainWindow):
         layout.addWidget(QLabel("Launcher"))
 
         # Получение версии установленного APK на устройстве
-        version = self.get_installed_version(device) if pkg_installed else "не установлено"
-        version_label = QLabel(f"Версия: {version}")
+        version = self.get_installed_version(device) if pkg_installed else "not installed"
+        version_label = QLabel(f"Version: {version}")
         layout.addWidget(version_label)
 
         self.device_list_layout.insertWidget(0, widget)
