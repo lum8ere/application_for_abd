@@ -5,7 +5,6 @@ import threading
 import subprocess
 import adbutils
 import tempfile
-import shutil
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -63,15 +62,19 @@ class ADBApp(QMainWindow):
         self.device_scroll.setWidget(self.device_list_widget)
         left_layout.addWidget(self.device_scroll)
 
-        # Правая панель (логи и запуск установки)
+        # Правая панель (логи и кнопка запуска установки)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.output_text = QTextEdit()
         self.output_text.setReadOnly(True)
         right_layout.addWidget(self.output_text)
 
+        # Кнопка установки и назначения Device Owner
         self.command_button = QPushButton("Install APK, Set Device Owner")
-        self.command_button.setStyleSheet("font-size: 12pt; padding: 5px;")
+        # Изначально кнопка заблокирована и курсор показывает, что она недоступна.
+        self.command_button.setEnabled(False)
+        self.command_button.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self.command_button.setStyleSheet("font-size: 12pt; padding: 5px;")  # стандартное оформление
         self.command_button.clicked.connect(self.send_command)
         right_layout.addWidget(self.command_button)
 
@@ -92,15 +95,8 @@ class ADBApp(QMainWindow):
 
     def load_apk(self):
         """Открываем диалог для выбора APK и копируем выбранный файл во временное место."""
-        # options = QFileDialog.options()
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "Select APK file", 
-            "", 
-            "APK Files (*.apk);;All Files (*)", 
-            # options=options
-        )
-
+        # options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select APK file", "", "APK Files (*.apk);;All Files (*)")
         if file_path:
             # Если ранее был загружен файл, удаляем его
             if self.temp_apk_path and os.path.exists(self.temp_apk_path):
@@ -108,7 +104,7 @@ class ADBApp(QMainWindow):
                     os.remove(self.temp_apk_path)
                 except Exception as e:
                     self.log_signal.emit(f"Error removing previous temporary APK: {e}")
-            # Создаём временный файл
+            # Создаём временный файл и копируем в него выбранный APK
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".apk") as tmp_file:
                     temp_file_path = tmp_file.name
@@ -128,6 +124,8 @@ class ADBApp(QMainWindow):
         if not self.temp_apk_path or not os.path.exists(self.temp_apk_path):
             self.apk_indicator.setStyleSheet("background-color: red; border: 1px solid black;")
             self.apk_label.setText("No APK loaded")
+            self.command_button.setEnabled(False)
+            self.command_button.setCursor(Qt.CursorShape.ForbiddenCursor)
             return
 
         version = "unknown"
@@ -144,6 +142,9 @@ class ADBApp(QMainWindow):
         self.apk_indicator.setStyleSheet("background-color: green; border: 1px solid black;")
         filename = os.path.basename(self.temp_apk_path)
         self.apk_label.setText(f"Loaded: {filename}, version: {version}")
+        # Активируем кнопку и меняем курсор на указывающий (hand)
+        self.command_button.setEnabled(True)
+        self.command_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def update_log(self, text: str):
         """Добавление текста в лог (правый виджет)."""
@@ -151,6 +152,7 @@ class ADBApp(QMainWindow):
 
     def update_device_list(self):
         """Обновление списка подключённых устройств с отображением статусов."""
+        # Удаляем старые записи, оставляя последний stretch
         while self.device_list_layout.count() > 1:
             item = self.device_list_layout.takeAt(0)
             widget = item.widget()
@@ -217,7 +219,10 @@ class ADBApp(QMainWindow):
         self.device_list_layout.insertWidget(0, widget)
 
     def get_installed_version(self, device):
-        """Извлечение versionName установленного пакета через 'dumpsys package'."""
+        """
+        Извлечение versionName установленного пакета через 'dumpsys package com.hmdm.launcher'.
+        Если не найдено, возвращает "N/A".
+        """
         try:
             pkg_info = device.shell("dumpsys package com.hmdm.launcher")
             for line in pkg_info.splitlines():
@@ -333,9 +338,6 @@ class ADBApp(QMainWindow):
         except Exception as e:
             return f"Failed to run pm install: {e}"
 
-        # (Опционально) можно удалить временный файл с устройства:
-        # device.shell(f"rm {remote_path}")
-
         return install_output
 
     def closeEvent(self, event):
@@ -351,5 +353,5 @@ class ADBApp(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = ADBApp()
-    window.show()
+    window.showMaximized()  # Открытие в оконном режиме на весь экран
     sys.exit(app.exec())
