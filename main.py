@@ -4,10 +4,12 @@ import re
 import threading
 import subprocess
 import adbutils
+import tempfile
+import shutil
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QScrollArea, QFrame
+    QPushButton, QTextEdit, QScrollArea, QFrame, QFileDialog
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 
@@ -20,22 +22,28 @@ class ADBApp(QMainWindow):
         self.setWindowTitle("ADB Device Manager")
         self.resize(900, 400)
 
-        # Путь к APK-файлу (должен лежать рядом с main.py)
-        self.apk_path = "mdmlab-MDM-launcher-6.19.apk"
+        # Путь к временно загруженному APK (изначально None)
+        self.temp_apk_path = None
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # Левая панель
+        # Левая панель (управление и список устройств)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
 
-        # Индикатор для локального APK
+        # Кнопка для выбора (загрузки) APK
+        self.load_apk_button = QPushButton("Load APK")
+        self.load_apk_button.setStyleSheet("font-size: 12pt; padding: 5px;")
+        self.load_apk_button.clicked.connect(self.load_apk)
+        left_layout.addWidget(self.load_apk_button)
+
+        # Индикатор загруженного APK
         self.apk_indicator = QFrame()
         self.apk_indicator.setFixedSize(20, 20)
         self.apk_indicator.setStyleSheet("background-color: red; border: 1px solid black;")
-        self.apk_label = QLabel("Checking local APK...")
+        self.apk_label = QLabel("No APK loaded")
         apk_layout = QHBoxLayout()
         apk_layout.addWidget(self.apk_indicator)
         apk_layout.addWidget(self.apk_label)
@@ -55,7 +63,7 @@ class ADBApp(QMainWindow):
         self.device_scroll.setWidget(self.device_list_widget)
         left_layout.addWidget(self.device_scroll)
 
-        # Правая панель (логи и кнопка)
+        # Правая панель (логи и запуск установки)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.output_text = QTextEdit()
@@ -70,9 +78,8 @@ class ADBApp(QMainWindow):
         main_layout.addWidget(left_panel, 1)
         main_layout.addWidget(right_panel, 2)
 
-        # Подключаем сигнал для логов
+        # Подключение сигналов
         self.log_signal.connect(self.update_log)
-        # Подключаем сигнал для обновления списка устройств
         self.update_devices_signal.connect(self.update_device_list)
 
         # Таймер обновления списка устройств
@@ -80,46 +87,70 @@ class ADBApp(QMainWindow):
         self.timer.timeout.connect(self.update_device_list)
         self.timer.start(3000)
 
-        # Первоначальное заполнение списка
+        # Первоначальное обновление списка устройств
         self.update_device_list()
 
-        # Проверяем наличие локального APK и его версию
-        self.check_local_apk()
+    def load_apk(self):
+        """Открываем диалог для выбора APK и копируем выбранный файл во временное место."""
+        # options = QFileDialog.options()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select APK file", 
+            "", 
+            "APK Files (*.apk);;All Files (*)", 
+            # options=options
+        )
 
-    def check_local_apk(self):
+        if file_path:
+            # Если ранее был загружен файл, удаляем его
+            if self.temp_apk_path and os.path.exists(self.temp_apk_path):
+                try:
+                    os.remove(self.temp_apk_path)
+                except Exception as e:
+                    self.log_signal.emit(f"Error removing previous temporary APK: {e}")
+            # Создаём временный файл
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".apk") as tmp_file:
+                    temp_file_path = tmp_file.name
+                    with open(file_path, "rb") as src:
+                        tmp_file.write(src.read())
+                self.temp_apk_path = temp_file_path
+                self.log_signal.emit(f"Loaded APK from {file_path} into temporary file {self.temp_apk_path}.")
+                self.check_loaded_apk()
+            except Exception as e:
+                self.log_signal.emit(f"Failed to load APK: {e}")
+
+    def check_loaded_apk(self):
         """
-        Проверяем, лежит ли локальный APK рядом с main.py и пытаемся узнать его версию через aapt.
-        Если aapt недоступен или не установлен, версия будет 'unknown'.
+        Проверяем загруженный временный APK (через aapt) и обновляем индикатор.
+        Для корректной работы требуется, чтобы утилита aapt была доступна в PATH.
         """
-        if not os.path.exists(self.apk_path):
+        if not self.temp_apk_path or not os.path.exists(self.temp_apk_path):
             self.apk_indicator.setStyleSheet("background-color: red; border: 1px solid black;")
-            self.apk_label.setText("APK not found")
+            self.apk_label.setText("No APK loaded")
             return
 
-        # Файл существует, пробуем получить версию
         version = "unknown"
         try:
-            result = subprocess.run(["aapt", "dump", "badging", self.apk_path],
+            result = subprocess.run(["aapt", "dump", "badging", self.temp_apk_path],
                                     capture_output=True, text=True)
             if result.returncode == 0:
-                import re
                 match = re.search(r"versionName='([^']+)'", result.stdout)
                 if match:
                     version = match.group(1)
         except Exception:
-            # Если возникла ошибка (например, aapt не найден), просто оставляем "unknown"
             pass
 
         self.apk_indicator.setStyleSheet("background-color: green; border: 1px solid black;")
-        self.apk_label.setText(f"APK found, version: {version}")
+        filename = os.path.basename(self.temp_apk_path)
+        self.apk_label.setText(f"Loaded: {filename}, version: {version}")
 
-    def update_log(self, text):
-        """Добавление текста в лог."""
+    def update_log(self, text: str):
+        """Добавление текста в лог (правый виджет)."""
         self.output_text.append(text)
 
     def update_device_list(self):
-        """Обновление списка подключённых устройств."""
-        # Удаляем старые записи, оставляя последний stretch
+        """Обновление списка подключённых устройств с отображением статусов."""
         while self.device_list_layout.count() > 1:
             item = self.device_list_layout.takeAt(0)
             widget = item.widget()
@@ -127,7 +158,9 @@ class ADBApp(QMainWindow):
                 widget.deleteLater()
 
         try:
+            # self.log_signal.emit("Updating device list...")
             devices = adbutils.adb.device_list()
+            # self.log_signal.emit(f"Found {len(devices)} device(s) connected.")
             if devices:
                 for device in devices:
                     self.add_device_entry(device)
@@ -140,7 +173,7 @@ class ADBApp(QMainWindow):
             self.device_list_layout.insertWidget(0, label)
 
     def add_device_entry(self, device):
-        """Добавление строки информации по одному устройству."""
+        """Формирование строки информации для одного устройства."""
         widget = QWidget()
         layout = QHBoxLayout(widget)
 
@@ -148,7 +181,7 @@ class ADBApp(QMainWindow):
         serial_label = QLabel(device.serial)
         layout.addWidget(serial_label)
 
-        # Проверка наличия device owner
+        # Проверка наличия Device Owner
         try:
             dump = device.shell("dumpsys device_policy")
             owner_set = ("Device Owner:" in dump)
@@ -162,7 +195,7 @@ class ADBApp(QMainWindow):
         layout.addWidget(owner_indicator)
         layout.addWidget(QLabel("Owner"))
 
-        # Проверка установленного пакета
+        # Проверка установленного пакета Launcher
         try:
             pkg_list = device.shell("pm list packages")
             pkg_installed = ("com.hmdm.launcher" in pkg_list)
@@ -176,7 +209,7 @@ class ADBApp(QMainWindow):
         layout.addWidget(pkg_indicator)
         layout.addWidget(QLabel("Launcher"))
 
-        # Получаем версию установленного APK
+        # Получение версии установленного APK на устройстве
         version = self.get_installed_version(device) if pkg_installed else "не установлено"
         version_label = QLabel(f"Версия: {version}")
         layout.addWidget(version_label)
@@ -184,14 +217,9 @@ class ADBApp(QMainWindow):
         self.device_list_layout.insertWidget(0, widget)
 
     def get_installed_version(self, device):
-        """
-        Возвращает versionName пакета com.hmdm.launcher,
-        извлекая его из вывода 'dumpsys package'.
-        Если не найдено, вернёт 'N/A'.
-        """
+        """Извлечение versionName установленного пакета через 'dumpsys package'."""
         try:
             pkg_info = device.shell("dumpsys package com.hmdm.launcher")
-            # Ищем строку, начинающуюся с "versionName="
             for line in pkg_info.splitlines():
                 line = line.strip()
                 if line.startswith("versionName="):
@@ -201,76 +229,124 @@ class ADBApp(QMainWindow):
             return "N/A"
 
     def send_command(self):
-        """Обработка нажатия кнопки - установка APK и назначение Device Owner."""
+        """Обработка нажатия кнопки: установка APK и назначение Device Owner."""
         threading.Thread(target=self.run_command, daemon=True).start()
 
     def run_command(self):
         """
-        Выполняется в отдельном потоке, чтобы не блокировать GUI.
-        После установки/назначения Device Owner для каждого устройства,
-        испускаем сигнал update_devices_signal, чтобы обновить индикаторы.
+        Для каждого устройства:
+          - Проверяется наличие Device Owner.
+          - Если его нет, производится установка APK (с использованием временного файла).
+          - После установки пытаемся назначить Device Owner.
+        После каждого устройства обновляется UI.
         """
-        self.log_signal.emit("Sending command to all devices...\n")
+        self.log_signal.emit("=== Starting bulk operation for all devices ===")
         try:
             devices = adbutils.adb.device_list()
             if not devices:
-                self.log_signal.emit("No devices connected.\n")
+                self.log_signal.emit("No devices connected. Operation aborted.")
                 return
 
-            for device in devices:
-                self.log_signal.emit(f"\nProcessing device: {device.serial}\n")
+            self.log_signal.emit(f"Total devices to process: {len(devices)}")
 
-                # Проверяем, назначен ли уже device owner
+            for idx, device in enumerate(devices, start=1):
+                self.log_signal.emit(f"\n--- Processing device #{idx}: {device.serial} ---")
+
+                # Проверяем наличие Device Owner
+                self.log_signal.emit("Checking if Device Owner is already set...")
                 dump = device.shell("dumpsys device_policy")
                 if "Device Owner:" in dump:
-                    self.log_signal.emit(f"Device {device.serial} already has a device owner.\n")
+                    self.log_signal.emit("Device Owner is already set. Skipping installation/owner setup.")
                 else:
-                    # Установка APK (если есть локальный файл)
-                    if not os.path.exists(self.apk_path):
-                        self.log_signal.emit("Local APK not found. Skipping installation.\n")
+                    # Проверяем, загружен ли APK
+                    if not self.temp_apk_path or not os.path.exists(self.temp_apk_path):
+                        self.log_signal.emit("No APK loaded. Please load an APK first. Skipping this device.")
                         continue
 
-                    self.log_signal.emit("Installing APK...\n")
-                    try:
-                        # Если пакет уже есть, удаляем его (так как device owner нет)
-                        pkg_list = device.shell("pm list packages")
-                        if "com.hmdm.launcher" in pkg_list:
-                            self.log_signal.emit("APK already installed, attempting to uninstall...\n")
-                            try:
-                                device.uninstall("com.hmdm.launcher")
-                            except Exception as uninst_err:
-                                self.log_signal.emit(f"Uninstall failed: {uninst_err}\n")
+                    self.log_signal.emit("Attempting to install the launcher APK...")
 
-                        device.install(self.apk_path)
-                        self.log_signal.emit("APK installed successfully.\n")
-                    except Exception as e:
-                        self.log_signal.emit(f"Failed to install APK on device {device.serial}: {e}\n")
-                        # Переходим к следующему устройству
-                        continue
+                    # Если пакет уже установлен, удаляем его
+                    pkg_list = device.shell("pm list packages")
+                    if "com.hmdm.launcher" in pkg_list:
+                        self.log_signal.emit("Launcher package already installed. Uninstalling it first...")
+                        try:
+                            uninstall_result = device.uninstall("com.hmdm.launcher")
+                            self.log_signal.emit(f"Uninstall result: {uninstall_result}")
+                        except Exception as uninst_err:
+                            self.log_signal.emit(f"Uninstall failed: {uninst_err}")
 
-                    # Повторно проверяем наличие device owner
+                    # Устанавливаем APK из памяти (используя временный файл)
+                    install_result = self.install_apk_from_memory(device, self.temp_apk_path)
+                    self.log_signal.emit(f"Install result: {install_result}")
+
+                    # Проверка и установка Device Owner, если необходимо
+                    self.log_signal.emit("Re-checking Device Owner after install...")
                     dump = device.shell("dumpsys device_policy")
                     if "Device Owner:" not in dump:
+                        self.log_signal.emit("Device Owner is not set. Attempting to set it now...")
                         output = device.shell("dpm set-device-owner com.hmdm.launcher/.AdminReceiver")
+                        self.log_signal.emit(f"Device owner command result: {output}")
                         if "error" in output.lower() or "failure" in output.lower():
-                            self.log_signal.emit(f"Command error on device {device.serial}: {output}\n")
-                            self.log_signal.emit("Attempting to kill adb server...\n")
+                            self.log_signal.emit("Error setting Device Owner. Attempting to kill ADB server.")
                             subprocess.run(["adb", "kill-server"], capture_output=True, text=True)
-                            self.log_signal.emit("ADB server killed.\n")
+                            self.log_signal.emit("ADB server killed.")
                         else:
-                            self.log_signal.emit(f"Command executed successfully on device {device.serial}.\n")
+                            self.log_signal.emit("Device Owner set successfully.")
+                    else:
+                        self.log_signal.emit("Device Owner is now set.")
 
-                # После обработки каждого устройства обновляем UI (в основном потоке)
+                # Обновляем UI для данного устройства
+                self.log_signal.emit("Updating UI for this device...")
                 self.update_devices_signal.emit()
 
+            self.log_signal.emit("\n=== All devices have been processed. ===")
+
         except Exception as e:
-            self.log_signal.emit(f"Exception occurred: {e}\n")
-            self.log_signal.emit("Attempting to kill adb server...\n")
+            self.log_signal.emit(f"Exception occurred: {e}")
+            self.log_signal.emit("Attempting to kill ADB server...")
             try:
                 subprocess.run(["adb", "kill-server"], capture_output=True, text=True)
-                self.log_signal.emit("ADB server killed.\n")
+                self.log_signal.emit("ADB server killed.")
             except Exception as kill_e:
-                self.log_signal.emit(f"Failed to kill adb server: {kill_e}\n")
+                self.log_signal.emit(f"Failed to kill ADB server: {kill_e}")
+
+    def install_apk_from_memory(self, device, local_path: str) -> str:
+        """
+        Установка APK на устройство:
+         1. Используется загруженный временный файл (local_path).
+         2. Файл отправляется на устройство (device.push) по пути /data/local/tmp/tmp_mdm_launcher.apk.
+         3. На устройстве выполняется установка через 'pm install'.
+         4. (Опционально) временный файл на устройстве можно удалить.
+        Возвращается результат выполнения установки.
+        """
+        remote_path = "/data/local/tmp/tmp_mdm_launcher.apk"
+
+        # Отправляем файл на устройство
+        try:
+            device.push(local_path, remote_path)
+        except Exception as e:
+            return f"Failed to push APK to device: {e}"
+
+        # Устанавливаем APK на устройстве
+        try:
+            install_output = device.shell(f"pm install {remote_path}")
+        except Exception as e:
+            return f"Failed to run pm install: {e}"
+
+        # (Опционально) можно удалить временный файл с устройства:
+        # device.shell(f"rm {remote_path}")
+
+        return install_output
+
+    def closeEvent(self, event):
+        """При закрытии приложения удаляем временный загруженный файл, если он существует."""
+        if self.temp_apk_path and os.path.exists(self.temp_apk_path):
+            try:
+                os.remove(self.temp_apk_path)
+                self.log_signal.emit(f"Temporary APK file {self.temp_apk_path} removed.")
+            except Exception as e:
+                self.log_signal.emit(f"Error removing temporary APK file: {e}")
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
